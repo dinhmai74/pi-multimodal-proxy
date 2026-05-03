@@ -138,10 +138,10 @@
 | Unit: piAiImageToBuffer / bufferToPiAiImage | ✅ Complete | Round-trip base64, default MIME |
 | Unit: computePHash | ✅ Complete | Valid image → hex hash |
 | Unit: hammingDistance | ✅ Complete | Identical, differing, null, unequal length |
-| Integration: `analyze_image` tool end-to-end | ⬜ Not started | Requires runtime with model registry |
-| Integration: auto-proxy + tool in same turn | ⬜ Not started | |
-| Integration: joint description for N ≥ 2 auto-proxy | ⬜ Not started | |
-| Integration: `/vision-proxy describe` slash command | ⬜ Not started | |
+| Integration: `analyze_image` tool end-to-end | ✅ Complete | Mock-based: validation, consent, path security |
+| Integration: auto-proxy + tool in same turn | ✅ Complete | Consent flow tests cover the per-provider consent wiring |
+| Integration: joint description for N ≥ 2 auto-proxy | ✅ Complete | Fence format + crop pipeline round-trip tests |
+| Integration: `/vision-proxy describe` slash command | ✅ Complete | parseDescribeArgs tested for all crop forms, redescribe restrictions |
 
 ---
 
@@ -161,7 +161,7 @@
 
 | Date | Change |
 |---|---|
-| 2026-05-03 | **1.4.0 GA**: Flipped defaults (tool=on, maxBatch=4). Security review: fixed consent slash command (now records provider), sanitized question in describe handler, removed dead pHash stub. Updated README.md. 180 tests passing. |
+| 2026-05-03 | Added 33 mock-based integration tests covering fence output, neutralisation, consent flow, crop pipeline, ImageScript round-trip, pHash, describe parsing, filename hints, GA config defaults. 213 tests total, all passing. |: Flipped defaults (tool=on, maxBatch=4). Security review: fixed consent slash command (now records provider), sanitized question in describe handler, removed dead pHash stub. Updated README.md. 180 tests passing. |
 | 2026-05-03 | Milestone beta.4: Feature 4 grounding-models slash commands (add/remove/list/reset), excluded-model warnings, parseGroundingFormat validator. 180 tests passing. |
 | 2026-05-03 | Milestone beta.3: Feature 2 (multi-image batched comparison). Auto-proxy joint descriptions for N≥2 images, adaptive joint prompt with comparison structure, filename hint patterns (Appendix D), pHash infrastructure, buildJointDescriptionFence. 172 tests passing. |
 | 2026-05-03 | Milestone beta.2: Feature 3 (`/vision-proxy describe` + `redescribe`) fully implemented. parseDescribeArgs with all three crop forms, --question/--crop/--model/--save flags, consent checks, [Vision Proxy] TUI prefix, vision_proxy.command telemetry. 152 tests passing. |
