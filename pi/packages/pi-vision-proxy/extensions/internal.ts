@@ -53,6 +53,16 @@ export interface ImageMeta {
 /** In-memory map: image hash → dimensions + filename. Populated on first ingestion. */
 export const _imageMeta = new Map<string, ImageMeta>();
 
+/** Maximum entries in _imageMeta to prevent unbounded memory growth. */
+const IMAGE_META_MAX = 500;
+
+function evictImageMeta(): void {
+	while (_imageMeta.size > IMAGE_META_MAX) {
+		const first = _imageMeta.keys().next().value;
+		if (first !== undefined) _imageMeta.delete(first);
+	}
+}
+
 // ── Crop types ────────────────────────────────────────────────────────────
 
 export type NamedRegion =
@@ -91,6 +101,15 @@ export class LRUCache<K, V> {
 		return this._maxSize;
 	}
 
+	/** Resize the cache, evicting excess entries if shrinking. */
+	resize(newMaxSize: number): void {
+		this._maxSize = newMaxSize;
+		while (this.map.size > this._maxSize) {
+			const first = this.map.keys().next().value;
+			if (first !== undefined) this.map.delete(first);
+		}
+	}
+
 	get(key: K): V | undefined {
 		const v = this.map.get(key);
 		if (v !== undefined) {
@@ -126,6 +145,7 @@ export interface DescriptionEntry {
 
 export interface ConsentEntry {
 	granted: boolean;
+	provider?: string; // which provider consent was granted for
 }
 
 export interface LegacyImage {
@@ -349,11 +369,15 @@ export function findDescriptions(entries: readonly SessionEntry[]): Map<string, 
 	return map;
 }
 
-export function hasConsent(entries: readonly SessionEntry[]): boolean {
+export function hasConsent(entries: readonly SessionEntry[], provider?: string): boolean {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const e = entries[i];
 		if (e?.type === "custom" && e.customType === CUSTOM_TYPE_CONSENT && e.data) {
-			return Boolean((e.data as ConsentEntry).granted);
+			const entry = e.data as ConsentEntry;
+			if (!entry.granted) return false;
+			// If a specific provider is requested, check it matches
+			if (provider && entry.provider && entry.provider !== provider) continue;
+			return true;
 		}
 	}
 	return false;
@@ -678,13 +702,24 @@ export function extractDimensions(data: Buffer): { width: number; height: number
 
 /**
  * Store image metadata in the in-memory map. Called on first ingestion.
+ * Accepts a Buffer directly to avoid re-decoding base64 when the raw bytes
+ * are already available (e.g. from readImageFileWithReason).
  */
 export function storeImageMeta(hash: string, imageBufferOrData: Buffer | string, filename?: string): void {
 	if (_imageMeta.has(hash)) return;
-	const buf = typeof imageBufferOrData === "string" ? Buffer.from(imageBufferOrData, "base64") : imageBufferOrData;
+	// Avoid full base64 re-decode when a Buffer was already produced by readFile
+	let buf: Buffer;
+	if (Buffer.isBuffer(imageBufferOrData)) {
+		buf = imageBufferOrData;
+	} else {
+		// Only decode the first ~1KB for dimension extraction (image-size reads headers only)
+		const headerB64 = imageBufferOrData.slice(0, 1400); // ~1KB of base64 ≈ 1KB decoded
+		buf = Buffer.from(headerB64, "base64");
+	}
 	const dims = extractDimensions(buf);
 	if (dims) {
 		_imageMeta.set(hash, { width: dims.width, height: dims.height, filename });
+		evictImageMeta();
 	}
 }
 

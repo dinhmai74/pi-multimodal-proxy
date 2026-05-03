@@ -103,26 +103,24 @@ const NamedRegionSchema = Type.Union(
 	{ description: "Coarse named region" },
 );
 
-const CropEntrySchema = Type.Object(
-	{
+const CropEntrySchema = Type.Union([
+	Type.Object({
 		image_index: Type.Number({ description: "0-based index into the images array" }),
-	},
-	{
-		additionalProperties: Type.Union([
-			Type.Object({ region: NamedRegionSchema }),
-			Type.Object({
-				normalized: Type.Object({
-					x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number(),
-				}),
-			}),
-			Type.Object({
-				pixels: Type.Object({
-					x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number(),
-				}),
-			}),
-		]),
-	},
-);
+		region: NamedRegionSchema,
+	}),
+	Type.Object({
+		image_index: Type.Number({ description: "0-based index into the images array" }),
+		normalized: Type.Object({
+			x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number(),
+		}),
+	}),
+	Type.Object({
+		image_index: Type.Number({ description: "0-based index into the images array" }),
+		pixels: Type.Object({
+			x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number(),
+		}),
+	}),
+]);
 
 const AnalyzeImageParams = Type.Object({
 	images: Type.Array(Type.String(), {
@@ -352,6 +350,8 @@ function describeReadReason(reason: ReadImageReason, bytes?: number): string {
 			return `${bytes ?? "?"} bytes exceeds limit (override with PI_VISION_PROXY_MAX_IMAGE_BYTES)`;
 		case "not-an-image":
 			return "unsupported extension";
+		default:
+			return reason;
 	}
 }
 
@@ -363,7 +363,7 @@ async function ensureConsent(
 	entries: readonly SessionEntry[],
 	pi: ExtensionAPI,
 ): Promise<boolean> {
-	if (hasConsent(entries)) return true;
+	if (hasConsent(entries, config.provider)) return true;
 	const message =
 		`Send image data${config.includeContext ? " and recent conversation context" : ""} ` +
 		`to ${modelLabel(config)}? (one-time consent for this session)`;
@@ -376,7 +376,7 @@ async function ensureConsent(
 		return false;
 	}
 	const ok = await ctx.ui.confirm("Vision Proxy — Data Egress Consent", message);
-	if (ok) pi.appendEntry<ConsentEntry>(CUSTOM_TYPE_CONSENT, { granted: true });
+	if (ok) pi.appendEntry<ConsentEntry>(CUSTOM_TYPE_CONSENT, { granted: true, provider: config.provider });
 	return ok;
 }
 
@@ -546,10 +546,10 @@ async function handleAnalyzeImage(
 		return `Error: model "${visionModel.name ?? visionModelId}" does not support image input.`;
 	}
 
-	// Check consent
+	// Check consent for the resolved vision provider
 	const entries = ctx.sessionManager.getEntries();
-	if (!hasConsent(entries)) {
-		return "Error: consent required before sending data to the vision model. Run /vision-proxy consent yes to grant.";
+	if (!hasConsent(entries, visionProvider)) {
+		return `Error: consent required before sending data to ${visionProvider}. Run /vision-proxy consent yes to grant.`;
 	}
 
 	// Resolve image references to PiAiImage objects
@@ -680,27 +680,40 @@ async function handleAnalyzeImage(
 			return "Error: vision model returned an empty response.";
 		}
 
-		// Build result fence(s)
-		let result: string;
-		if (imagePayloads.length === 1) {
-			const p = imagePayloads[0];
-			result = buildAnalysisFence(
-				p.hash,
-				text,
-				p.meta,
-				p.crop,
-				groundingFormat !== "none" ? groundingFormat : undefined,
-			);
-		} else {
-			// Multi-image: single fence wrapping all
-			result = buildAnalysisFence(
-				sortedHashes.join("+"),
-				text,
-				undefined,
-				undefined,
-				groundingFormat !== "none" ? groundingFormat : undefined,
-			);
-		}
+	// NOTE: Crop coordinates are resolved but NOT yet applied to image bytes.
+	// The full uncropped image is sent to the vision model. Until `sharp` is integrated
+	// for local cropping, we do not include crop attributes in the fence to avoid
+	// misleading the agent with inaccurate width/height/crop_origin values.
+	const cropRequested = imagePayloads.some((p) => p.crop);
+	if (cropRequested) {
+		ctx.ui.notify(
+			"[vision-proxy] Crop requested but not yet applied — full image will be sent. " +
+				"Cropping will be available once the `sharp` package is integrated.",
+			"warning",
+		);
+	}
+
+	// Build result fence(s)
+	// When crop was requested but not applied, build fence WITHOUT crop metadata
+	let result: string;
+	if (imagePayloads.length === 1) {
+		const p = imagePayloads[0];
+		result = buildAnalysisFence(
+			p.hash,
+			text,
+			p.meta,
+			undefined, // crop not applied — omit crop metadata
+			groundingFormat !== "none" ? groundingFormat : undefined,
+		);
+	} else {
+		result = buildAnalysisFence(
+			sortedHashes.join("+"),
+			text,
+			undefined,
+			undefined,
+			groundingFormat !== "none" ? groundingFormat : undefined,
+		);
+	}
 
 		// Cache the result
 		_toolCache.set(cacheKey, result);
@@ -709,6 +722,7 @@ async function handleAnalyzeImage(
 		pi.appendEntry(CUSTOM_TYPE_TOOL_CALL, {
 			images: imagePayloads.map((p) => p.hash),
 			cropForm: crops?.length ? (crops[0].region ? "region" : crops[0].normalized ? "normalized" : "pixels") : "none",
+			cropApplied: false, // cropping not yet implemented
 			question: question.slice(0, 200),
 			reason: reason ? reason.slice(0, 200) : undefined,
 			model: `${visionProvider}/${visionModelId}`,
@@ -750,6 +764,11 @@ export default function (pi: ExtensionAPI) {
 					// Runtime check — tool may have been disabled mid-session
 					if (config.tool !== "on" || config.mode === "off") {
 						return { content: [{ type: "text" as const, text: "Error: analyze_image tool is currently disabled. Use /vision-proxy tool on to enable." }] };
+					}
+
+					// Sync cache size with current config
+					if (_toolCache.maxSize !== config.cacheSize) {
+						_toolCache.resize(config.cacheSize);
 					}
 
 					const result = await handleAnalyzeImage(params, extCtx, pi, config);

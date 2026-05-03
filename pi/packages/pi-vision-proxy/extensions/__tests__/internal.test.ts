@@ -23,6 +23,7 @@ import {
 	cropSignature,
 	DEFAULT_CONFIG,
 	envFlags,
+	escapeAttr,
 	extractCandidateImagePaths,
 	extractDimensions,
 	fenceUntrusted,
@@ -334,6 +335,25 @@ describe("hasConsent", () => {
 			customEntry(CUSTOM_TYPE_CONSENT, { granted: true }),
 		];
 		assert.equal(hasConsent(granted), true);
+	});
+
+	it("supports per-provider consent", () => {
+		// Consent for anthropic should not carry over to openai
+		const entries: Entry[] = [
+			customEntry(CUSTOM_TYPE_CONSENT, { granted: true, provider: "anthropic" }),
+		];
+		assert.equal(hasConsent(entries, "anthropic"), true);
+		assert.equal(hasConsent(entries, "openai"), false);
+		// Without provider arg, any granted consent matches
+		assert.equal(hasConsent(entries), true);
+	});
+
+	it("global consent (no provider) matches any provider", () => {
+		const entries: Entry[] = [
+			customEntry(CUSTOM_TYPE_CONSENT, { granted: true }),
+		];
+		assert.equal(hasConsent(entries, "anthropic"), true);
+		assert.equal(hasConsent(entries, "openai"), true);
 	});
 });
 
@@ -880,6 +900,32 @@ describe("LRUCache", () => {
 		assert.equal(cache.size, 0);
 		assert.equal(cache.get("a"), undefined);
 	});
+
+	it("resize shrinks the cache and evicts excess", () => {
+		const cache = new LRUCache<string, number>(5);
+		for (let i = 0; i < 5; i++) cache.set(`k${i}`, i);
+		assert.equal(cache.size, 5);
+		cache.resize(2);
+		assert.equal(cache.size, 2);
+		assert.equal(cache.maxSize, 2);
+		// Oldest entries should be evicted
+		assert.equal(cache.get("k0"), undefined);
+		assert.equal(cache.get("k1"), undefined);
+		assert.equal(cache.get("k2"), undefined);
+		// Newest should survive
+		assert.equal(cache.get("k3"), 3);
+		assert.equal(cache.get("k4"), 4);
+	});
+
+	it("resize to larger does not lose entries", () => {
+		const cache = new LRUCache<string, number>(3);
+		cache.set("a", 1);
+		cache.set("b", 2);
+		cache.resize(10);
+		assert.equal(cache.size, 2);
+		assert.equal(cache.get("a"), 1);
+		assert.equal(cache.get("b"), 2);
+	});
 });
 
 describe("extractDimensions", () => {
@@ -945,6 +991,39 @@ describe("fenceUntrusted (all three tags)", () => {
 	it("neutralizes vision_proxy_description tags (unchanged)", () => {
 		const out = fenceUntrusted('<vision_proxy_description>content</vision_proxy_description>');
 		assert.ok(!out.includes("<vision_proxy_description>"));
+	});
+
+	it("neutralizes both < and > in tags", () => {
+		const out = fenceUntrusted('<vision_proxy_description>test</vision_proxy_description>');
+		// Neither raw < nor raw > should appear in the tag parts
+		const tagMatch = out.match(/vision_proxy_description/g);
+		assert.ok(tagMatch);
+		// The opening bracket of each tag should be neutralized
+		assert.ok(!out.includes("<vision_proxy"), "opening < should be neutralized");
+		assert.ok(!out.includes("</vision_proxy"), "closing < should be neutralized");
+	});
+});
+
+describe("escapeAttr", () => {
+	it("escapes double quotes", () => {
+		assert.equal(escapeAttr('file"name.png'), "file&quot;name.png");
+	});
+
+	it("escapes angle brackets", () => {
+		assert.equal(escapeAttr("a<b>c"), "a&lt;b&gt;c");
+	});
+
+	it("escapes ampersands", () => {
+		assert.equal(escapeAttr("a&b"), "a&amp;b");
+
+	});
+
+	it("leaves safe characters intact", () => {
+		assert.equal(escapeAttr("photo.png"), "photo.png");
+	});
+
+	it("handles empty string", () => {
+		assert.equal(escapeAttr(""), "");
 	});
 });
 
