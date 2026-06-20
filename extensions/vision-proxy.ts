@@ -194,15 +194,37 @@ const TOOL_DESCRIPTION = [
 	"The tool result is authoritative for the specific question asked; the cached generic description remains the default for everything else.",
 ].join("\n");
 
-// ── Tool result cache (shared across calls in the session) ─────────────────
-
-const _toolCache = new LRUCache<string, string>(50);
-
 /** Maximum analyze_image tool calls per agent turn. Prevents cost runaway. */
 const MAX_TOOL_CALLS_PER_TURN = 10;
 
-/** Current turn's tool call count (reset on each before_agent_start). */
-let _toolCallCount = 0;
+/** Default tool-result cache size; resized to config.cacheSize on first use. */
+const DEFAULT_TOOL_CACHE_SIZE = 50;
+
+// ── Per-session state ──────────────────────────────────────────────────────
+// Multiple Pi sessions can share a single Node process (tmux, SDK-spawned
+// agents). Module-level singletons would let one session's tool-result cache
+// and per-turn rate-limit counter bleed into another's, making the limit
+// unreliable. Key the state off the session's SessionManager instance, which
+// is unique per session; the WeakMap entry is reclaimed when the session ends.
+
+interface SessionState {
+	/** Tool result cache, shared across calls within one session. */
+	toolCache: LRUCache<string, string>;
+	/** Current turn's tool call count (reset on each before_agent_start). */
+	toolCallCount: number;
+}
+
+const _sessionState = new WeakMap<object, SessionState>();
+
+function getSessionState(ctx: ExtensionContext): SessionState {
+	const key = ctx.sessionManager as unknown as object;
+	let state = _sessionState.get(key);
+	if (!state) {
+		state = { toolCache: new LRUCache<string, string>(DEFAULT_TOOL_CACHE_SIZE), toolCallCount: 0 };
+		_sessionState.set(key, state);
+	}
+	return state;
+}
 
 /** Sanitize text for embedding inside XML-like tags. */
 function sanitizeXml(text: string): string {
@@ -1044,6 +1066,7 @@ async function handleAnalyzeImage(
 	const cacheKey = buildToolCacheKey(orderedHashes, cropSig, questionHash, `${visionProvider}/${visionModelId}`);
 
 	// Check cache
+	const _toolCache = getSessionState(ctx).toolCache;
 	const cached = _toolCache.get(cacheKey);
 	if (cached) {
 		// Log telemetry for cache hit
@@ -1205,14 +1228,15 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// Rate limit per turn
-					_toolCallCount++;
-					if (_toolCallCount > MAX_TOOL_CALLS_PER_TURN) {
+					const state = getSessionState(extCtx);
+					state.toolCallCount++;
+					if (state.toolCallCount > MAX_TOOL_CALLS_PER_TURN) {
 						return { content: [{ type: "text" as const, text: `Error: analyze_image call limit reached (${MAX_TOOL_CALLS_PER_TURN} per turn). Rephrase your question or try in the next turn.` }] };
 					}
 
 					// Sync cache size with current config
-					if (_toolCache.maxSize !== config.cacheSize) {
-						_toolCache.resize(config.cacheSize);
+					if (state.toolCache.maxSize !== config.cacheSize) {
+						state.toolCache.resize(config.cacheSize);
 					}
 
 					const result = await handleAnalyzeImage(params, extCtx, pi, config);
@@ -1229,7 +1253,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event: SessionStartEvent, ctx: ExtensionContext) => {
 		// Clear per-session state from previous sessions
 		_imageMeta.clear();
-		_toolCache.clear();
+		const state = getSessionState(ctx);
+		state.toolCache.clear();
+		state.toolCallCount = 0;
 
 		_fileConfig = await readPersistentFile();
 		const config = resolveConfig(ctx.sessionManager.getEntries(), process.env, _fileConfig);
@@ -1249,7 +1275,7 @@ export default function (pi: ExtensionAPI) {
 			ctx: ExtensionContext,
 		): Promise<BeforeAgentStartEventResult | void> => {
 			// Reset per-turn tool call counter
-			_toolCallCount = 0;
+			getSessionState(ctx).toolCallCount = 0;
 
 			// Collect images: structured attachments + file paths detected in prompt text
 			const images: (PiAiImage | LegacyImage)[] = [...(event.images ?? [])];

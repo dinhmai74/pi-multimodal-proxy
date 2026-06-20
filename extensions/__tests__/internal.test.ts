@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join, parse } from "node:path";
@@ -59,6 +59,7 @@ import {
 	hammingDistance,
 	computePHash,
 	cropImage,
+	shutdownCropWorkers,
 	piAiImageToBuffer,
 	bufferToPiAiImage,
 	shouldStripImages,
@@ -1321,6 +1322,10 @@ async function create10x10Png(): Promise<Buffer> {
 }
 
 describe("cropImage (ImageScript)", () => {
+	after(async () => {
+		await shutdownCropWorkers();
+	});
+
 	it("crops a 10×10 PNG to a 5×5 region", async () => {
 		const png = await create10x10Png();
 		const crop = { x: 2, y: 3, width: 5, height: 5 };
@@ -1354,6 +1359,86 @@ describe("cropImage (ImageScript)", () => {
 		// JPEG should start with FF D8
 		assert.equal(result[0], 0xff);
 		assert.equal(result[1], 0xd8);
+	});
+
+	it("succeeds within a generous decode timeout (env override is honoured)", async () => {
+		const prev = process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS;
+		process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS = "10000";
+		try {
+			const png = await create10x10Png();
+			const result = await cropImage(png, { x: 0, y: 0, width: 10, height: 10 }, "image/png");
+			assert.ok(result, "crop should succeed with a generous timeout");
+		} finally {
+			if (prev === undefined) delete process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS;
+			else process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS = prev;
+		}
+	});
+
+	it("returns null (no throw) for undecodable garbage bytes", async () => {
+		const garbage = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+		const result = await cropImage(garbage, { x: 0, y: 0, width: 5, height: 5 }, "image/png");
+		assert.equal(result, null);
+	});
+
+	it("falls back to the in-thread path when the worker is disabled", async () => {
+		const prev = process.env.PI_VISION_PROXY_DECODE_WORKER;
+		process.env.PI_VISION_PROXY_DECODE_WORKER = "0";
+		try {
+			const png = await create10x10Png();
+			const result = await cropImage(png, { x: 2, y: 3, width: 5, height: 5 }, "image/png");
+			assert.ok(result, "in-thread fallback should still crop");
+			const dims = extractDimensions(result);
+			assert.ok(dims && dims.width === 5 && dims.height === 5, "fallback crop should have correct dims");
+		} finally {
+			if (prev === undefined) delete process.env.PI_VISION_PROXY_DECODE_WORKER;
+			else process.env.PI_VISION_PROXY_DECODE_WORKER = prev;
+		}
+	});
+
+	it("handles several sequential crops (worker pool reuse)", async () => {
+		const png = await create10x10Png();
+		for (let i = 0; i < 5; i++) {
+			const result = await cropImage(png, { x: 0, y: 0, width: 5, height: 5 }, "image/png");
+			assert.ok(result, `crop ${i} should succeed`);
+			const dims = extractDimensions(result);
+			assert.ok(dims && dims.width === 5 && dims.height === 5, `crop ${i} dims`);
+		}
+	});
+
+	it("works with pooling disabled (spawn-per-call)", async () => {
+		const prev = process.env.PI_VISION_PROXY_DECODE_WORKER_POOL;
+		process.env.PI_VISION_PROXY_DECODE_WORKER_POOL = "0";
+		try {
+			const png = await create10x10Png();
+			const a = await cropImage(png, { x: 0, y: 0, width: 5, height: 5 }, "image/png");
+			const b = await cropImage(png, { x: 1, y: 1, width: 4, height: 4 }, "image/png");
+			assert.ok(a && b, "both crops should succeed without pooling");
+		} finally {
+			if (prev === undefined) delete process.env.PI_VISION_PROXY_DECODE_WORKER_POOL;
+			else process.env.PI_VISION_PROXY_DECODE_WORKER_POOL = prev;
+		}
+	});
+
+	it("hard-terminates the worker on timeout (returns null, does not hang)", async () => {
+		// Worker thread bootstrap + WASM decode cannot complete within 1ms, so the
+		// main-thread timer fires and terminate()s the worker — proving the timeout
+		// is a hard limit rather than a best-effort race against synchronous WASM.
+		const prevWorker = process.env.PI_VISION_PROXY_DECODE_WORKER;
+		const prevTimeout = process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS;
+		process.env.PI_VISION_PROXY_DECODE_WORKER = "1";
+		process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS = "1";
+		try {
+			const png = await create10x10Png();
+			const started = Date.now();
+			const result = await cropImage(png, { x: 0, y: 0, width: 10, height: 10 }, "image/png");
+			assert.equal(result, null, "timed-out crop should return null");
+			assert.ok(Date.now() - started < 5000, "should return promptly, not hang");
+		} finally {
+			if (prevWorker === undefined) delete process.env.PI_VISION_PROXY_DECODE_WORKER;
+			else process.env.PI_VISION_PROXY_DECODE_WORKER = prevWorker;
+			if (prevTimeout === undefined) delete process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS;
+			else process.env.PI_VISION_PROXY_DECODE_TIMEOUT_MS = prevTimeout;
+		}
 	});
 });
 
