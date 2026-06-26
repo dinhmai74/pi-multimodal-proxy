@@ -1,6 +1,6 @@
 {
   "name": "pi-multimodal-proxy",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Automatic image, video and audio description for any model in Pi. Routes media to a multimodal model and injects descriptions into context.",
   "keywords": [
     "pi-package"
@@ -8,9 +8,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pungggi/pi-vision-proxy.git"
+    "url": "git+https://github.com/pungggi/pi-multimodal-proxy.git"
   },
-  "homepage": "https://github.com/pungggi/pi-vision-proxy#readme",
+  "homepage": "https://github.com/pungggi/pi-multimodal-proxy#readme",
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --no-warnings --test extensions/__tests__/*.test.ts"

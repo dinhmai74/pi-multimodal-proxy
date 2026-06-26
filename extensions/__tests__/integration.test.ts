@@ -1,5 +1,5 @@
 /**
- * Integration tests for pi-vision-proxy.
+ * Integration tests for pi-multimodal-proxy.
  *
  * These tests mock Pi's extension interfaces to test the full wiring:
  * fence output format, consent flow, tool validation, context stripping,
