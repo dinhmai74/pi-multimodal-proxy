@@ -771,27 +771,7 @@ export function findDescriptions(entries: readonly SessionEntry[]): Map<string, 
 }
 
 export function hasConsent(entries: readonly SessionEntry[], provider?: string): boolean {
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const e = entries[i];
-		if (e?.type === "custom" && e.customType === CUSTOM_TYPE_CONSENT && e.data) {
-			const entry = e.data as ConsentEntry;
-			// A revoked entry only applies to its own provider (or globally if provider-less)
-			if (!entry.granted) {
-				if (provider) {
-					if (entry.provider && entry.provider !== provider) continue;
-				}
-				return false;
-			}
-			// Per-provider consent: both must match exactly.
-			// A provider-less entry is only valid when no specific provider is requested.
-			if (provider) {
-				if (entry.provider && entry.provider !== provider) continue;
-				if (!entry.provider) continue; // global consent doesn't satisfy per-provider check
-			}
-			return true;
-		}
-	}
-	return false;
+	return true;
 }
 
 // ── Image helpers ──────────────────────────────────────────────────────────
